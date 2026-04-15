@@ -20,7 +20,7 @@
 <aside class="sidebar">
 <section class="section"><h2>All Charts</h2><div id="chartsList" class="charts"></div><div class="divider"></div><button id="newChartBtn" class="btn primary" style="width:100%;justify-content:center">New chart</button></section>
 <section class="section"><h2>Create</h2><div class="tool-grid"><button id="addNodeBtn" class="btn">Add node</button><button id="connectBtn" class="btn">Connect</button><button id="duplicateBtn" class="btn">Duplicate</button><button id="deleteBtn" class="btn danger">Delete</button></div></section>
-<section class="section"><h2>Navigation</h2><p class="hint">Left-drag empty space for marquee selection. Right-click drag pans the workspace. Scroll zooms around your cursor.</p><div class="inline-help"><span class="chip"><span class="kbd">Ctrl</span>&nbsp;C copy</span><span class="chip"><span class="kbd">Ctrl</span>&nbsp;V paste</span><span class="chip"><span class="kbd">Del</span>&nbsp;delete</span></div></section>
+<section class="section"><h2>Navigation</h2><p class="hint">Left-drag empty space for marquee selection. Right-click drag pans the workspace. Scroll zooms around your cursor.</p><div class="inline-help"><span class="chip"><span class="kbd">Ctrl</span>&nbsp;Z undo</span><span class="chip"><span class="kbd">Ctrl</span>&nbsp;C copy</span><span class="chip"><span class="kbd">Ctrl</span>&nbsp;V paste</span><span class="chip"><span class="kbd">Del</span>&nbsp;delete</span></div></section>
 </aside>
 <section id="workspace" class="workspace"><canvas id="stage"></canvas><div class="mode-pill" id="connectHint">Connection mode: select a source node, then a target node</div><div class="floating"><span class="zoom-pill" id="zoomLabel">100%</span><span>Right-drag pan</span><span>Scroll zoom</span></div><div id="toast" class="toast"></div></section>
 <aside class="props"><section class="section"><h2>Properties</h2><div id="propertyPanel"></div></section></aside>
@@ -50,6 +50,37 @@ let pointer={down:false,button:0,last:{x:0,y:0},start:{x:0,y:0},worldStart:{x:0,
 let marquee=null;
 let view={x:0,y:0,scale:1};
 let saveTimer=null;
+
+// ── Undo stack ────────────────────────────────────────────────────────────────
+const MAX_UNDO=80;
+let undoStack=[];
+let undoPointer=-1; // index of current state in stack
+
+function snapshotChart(){
+  return JSON.parse(JSON.stringify(chart()));
+}
+function pushUndo(){
+  // Discard any redo states ahead of current pointer
+  undoStack=undoStack.slice(0,undoPointer+1);
+  undoStack.push(snapshotChart());
+  if(undoStack.length>MAX_UNDO)undoStack.shift();
+  undoPointer=undoStack.length-1;
+}
+function undo(){
+  if(undoPointer<=0){showToast("Nothing to undo");return}
+  undoPointer--;
+  const snap=JSON.parse(JSON.stringify(undoStack[undoPointer]));
+  const idx=data.charts.findIndex(c=>c.id===currentId);
+  if(idx>=0)data.charts[idx]=snap;
+  selectedNodes.clear();
+  selectedConnection=null;
+  saveSoon();
+  syncUI();
+  draw();
+  showToast("Undo");
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 const dpr=Math.max(1,window.devicePixelRatio||1);
 function uid(prefix){return prefix+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-4)}
 function now(){return new Date().toISOString()}
@@ -80,25 +111,185 @@ function setTheme(theme){document.body.dataset.theme=theme;localStorage.setItem(
 setTheme(localStorage.getItem(themeKey)||"dark");
 function renderCharts(){chartsList.innerHTML="";data.charts.slice().sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt)).forEach(c=>{const row=document.createElement("div");row.className="chart-row"+(c.id===currentId?" active":"");const left=document.createElement("div");left.innerHTML="<div class='chart-name'></div><div class='chart-meta'></div>";left.querySelector(".chart-name").textContent=c.name;left.querySelector(".chart-meta").textContent=c.nodes.length+" nodes · "+c.connections.length+" links";left.onclick=()=>switchChart(c.id);const actions=document.createElement("div");actions.className="mini-actions";const copy=mini("⧉","Duplicate chart",()=>duplicateChart(c.id));const del=mini("×","Delete chart",()=>deleteChart(c.id));actions.append(copy,del);row.append(left,actions);chartsList.append(row)})}
 function mini(txt,label,fn){const b=document.createElement("button");b.className="icon-btn";b.textContent=txt;b.title=label;b.onclick=e=>{e.stopPropagation();fn()};return b}
-function switchChart(id){currentId=id;selectedNodes.clear();selectedConnection=null;connectMode=false;connectSource=null;fitView(false);syncUI();saveNow();draw()}
-function duplicateChart(id){const source=data.charts.find(c=>c.id===id);if(!source)return;const clone=JSON.parse(JSON.stringify(source));clone.id=uid("chart-");clone.name=uniqueName(source.name,clone.id);clone.createdAt=now();clone.updatedAt=now();data.charts.push(clone);currentId=clone.id;selectedNodes.clear();selectedConnection=null;syncUI();saveNow();draw();showToast("Chart duplicated")}
-function deleteChart(id){if(data.charts.length===1){showToast("At least one chart is required");return}const c=data.charts.find(x=>x.id===id);if(!c||!confirm("Delete “"+c.name+"”?"))return;data.charts=data.charts.filter(x=>x.id!==id);if(currentId===id)currentId=data.charts[0].id;selectedNodes.clear();selectedConnection=null;syncUI();saveNow();draw()}
-function newChart(){const c={id:uid("chart-"),name:nextUntitled(),createdAt:now(),updatedAt:now(),nodes:[],connections:[]};data.charts.push(c);currentId=c.id;selectedNodes.clear();selectedConnection=null;view={x:canvas.clientWidth/2,y:canvas.clientHeight/2,scale:1};syncUI();saveNow();draw()}
+function switchChart(id){currentId=id;selectedNodes.clear();selectedConnection=null;connectMode=false;connectSource=null;undoStack=[];undoPointer=-1;fitView(false);syncUI();saveNow();draw();
+  // Seed undo stack for the newly switched chart
+  pushUndo();}
+function duplicateChart(id){const source=data.charts.find(c=>c.id===id);if(!source)return;const clone=JSON.parse(JSON.stringify(source));clone.id=uid("chart-");clone.name=uniqueName(source.name,clone.id);clone.createdAt=now();clone.updatedAt=now();data.charts.push(clone);currentId=clone.id;selectedNodes.clear();selectedConnection=null;undoStack=[];undoPointer=-1;syncUI();saveNow();draw();pushUndo();showToast("Chart duplicated")}
+function deleteChart(id){if(data.charts.length===1){showToast("At least one chart is required");return}const c=data.charts.find(x=>x.id===id);if(!c||!confirm('Delete ""+c.name+""?'))return;data.charts=data.charts.filter(x=>x.id!==id);if(currentId===id)currentId=data.charts[0].id;selectedNodes.clear();selectedConnection=null;syncUI();saveNow();draw()}
+function newChart(){const c={id:uid("chart-"),name:nextUntitled(),createdAt:now(),updatedAt:now(),nodes:[],connections:[]};data.charts.push(c);currentId=c.id;selectedNodes.clear();selectedConnection=null;undoStack=[];undoPointer=-1;view={x:canvas.clientWidth/2,y:canvas.clientHeight/2,scale:1};syncUI();saveNow();draw();pushUndo()}
 function syncUI(){const c=chart();titleInput.value=c.name;workspace.classList.toggle("connecting",connectMode);renderCharts();renderProps();zoomLabel.textContent=Math.round(view.scale*100)+"%"}
-function renderProps(){const c=chart();const nodes=[...selectedNodes].map(id=>c.nodes.find(n=>n.id===id)).filter(Boolean);const conn=selectedConnection?c.connections.find(x=>x.id===selectedConnection):null;if(nodes.length===1){const n=nodes[0];props.innerHTML="<div class='field'><label>Text</label><textarea id='pText'></textarea></div><div class='field'><label>Shape</label><select id='pShape'><option value='square'>Square</option><option value='circle'>Circle</option><option value='diamond'>Diamond</option><option value='pill'>Pill</option></select></div><div class='row'><div class='field'><label>Width</label><input id='pW' type='number' min='50'></div><div class='field'><label>Height</label><input id='pH' type='number' min='40'></div></div><div class='row'><div class='field'><label>Fill</label><input id='pFill' type='color'></div><div class='field'><label>Border</label><input id='pStroke' type='color'></div></div><div class='row'><div class='field'><label>Text color</label><input id='pTextColor' type='color'></div><div class='field'><label>Border thickness</label><input id='pBorder' type='number' min='1' max='16'></div></div><button id='focusBtn' class='btn' style='width:100%;justify-content:center'>Center selection</button>";setVal("pText",n.text);setVal("pShape",n.shape);setVal("pW",n.w);setVal("pH",n.h);setVal("pFill",n.fill);setVal("pStroke",n.stroke);setVal("pTextColor",n.textColor);setVal("pBorder",n.border);bind("pText","input",v=>n.text=v);bind("pShape","change",v=>n.shape=v);bind("pW","input",v=>n.w=Math.max(50,+v||50));bind("pH","input",v=>n.h=Math.max(40,+v||40));bind("pFill","input",v=>n.fill=v);bind("pStroke","input",v=>n.stroke=v);bind("pTextColor","input",v=>n.textColor=v);bind("pBorder","input",v=>n.border=Math.max(1,Math.min(16,+v||1)));document.getElementById("focusBtn").onclick=()=>centerOnNodes(nodes);return}
-if(nodes.length>1){props.innerHTML="<div class='empty'>"+nodes.length+" nodes selected. Drag any selected node to move the group, or use copy, paste, duplicate, and delete shortcuts.</div><div class='divider'></div><div class='row'><div class='field'><label>Fill</label><input id='mFill' type='color' value='#dbeafe'></div><div class='field'><label>Border</label><input id='mStroke' type='color' value='#2563eb'></div></div><button id='centerMulti' class='btn' style='width:100%;justify-content:center'>Center selection</button>";bindMulti("mFill","input",v=>nodes.forEach(n=>n.fill=v));bindMulti("mStroke","input",v=>nodes.forEach(n=>n.stroke=v));document.getElementById("centerMulti").onclick=()=>centerOnNodes(nodes);return}
-if(conn){props.innerHTML="<div class='field'><label>Line label</label><input id='cLabel'></div><div class='row'><div class='field'><label>Line color</label><input id='cColor' type='color'></div><div class='field'><label>Line width</label><input id='cWidth' type='number' min='1' max='12'></div></div><button id='reverseConn' class='btn' style='width:100%;justify-content:center'>Reverse direction</button>";setVal("cLabel",conn.label||"");setVal("cColor",conn.color||"#64748b");setVal("cWidth",conn.width||2);bind("cLabel","input",v=>conn.label=v,true);bind("cColor","input",v=>conn.color=v,true);bind("cWidth","input",v=>conn.width=Math.max(1,Math.min(12,+v||1)),true);document.getElementById("reverseConn").onclick=()=>{const t=conn.from;conn.from=conn.to;conn.to=t;saveSoon();draw()};return}
-props.innerHTML="<div class='empty'>Select a node to edit its shape, border, colors, size, and text. Select a line to edit its label and style.</div>"}
-function setVal(id,v){document.getElementById(id).value=v}
-function bind(id,event,fn,isConn){document.getElementById(id).addEventListener(event,e=>{fn(e.target.value);saveSoon();renderProps();draw()},{once:false});if(isConn){}
+
+// ── Property panel ─────────────────────────────────────────────────────────
+// renderProps builds the panel but PRESERVES focus by tracking which field
+// was active and its cursor position before rebuilding.
+function renderProps(){
+  const c=chart();
+  const nodes=[...selectedNodes].map(id=>c.nodes.find(n=>n.id===id)).filter(Boolean);
+  const conn=selectedConnection?c.connections.find(x=>x.id===selectedConnection):null;
+
+  // Track focus so we can restore it after an intentional rebuild (e.g. shape change)
+  const focusedId=document.activeElement&&document.activeElement.id;
+  const selStart=document.activeElement&&document.activeElement.selectionStart;
+  const selEnd=document.activeElement&&document.activeElement.selectionEnd;
+
+  if(nodes.length===1){
+    const n=nodes[0];
+    props.innerHTML="<div class='field'><label>Text</label><textarea id='pText'></textarea></div><div class='field'><label>Shape</label><select id='pShape'><option value='square'>Square</option><option value='circle'>Circle</option><option value='diamond'>Diamond</option><option value='pill'>Pill</option></select></div><div class='row'><div class='field'><label>Width</label><input id='pW' type='number' min='50'></div><div class='field'><label>Height</label><input id='pH' type='number' min='40'></div></div><div class='row'><div class='field'><label>Fill</label><input id='pFill' type='color'></div><div class='field'><label>Border</label><input id='pStroke' type='color'></div></div><div class='row'><div class='field'><label>Text color</label><input id='pTextColor' type='color'></div><div class='field'><label>Border thickness</label><input id='pBorder' type='number' min='1' max='16'></div></div><button id='focusBtn' class='btn' style='width:100%;justify-content:center'>Center selection</button>";
+    setVal("pText",n.text);
+    setVal("pShape",n.shape);
+    setVal("pW",n.w);
+    setVal("pH",n.h);
+    setVal("pFill",n.fill);
+    setVal("pStroke",n.stroke);
+    setVal("pTextColor",n.textColor);
+    setVal("pBorder",n.border);
+
+    // Bind without rebuilding the panel on every keystroke
+    bindLive("pText","input",v=>{n.text=v});
+    bindLive("pShape","change",v=>{pushUndo();n.shape=v;saveSoon();draw()});
+    bindLive("pW","input",v=>{n.w=Math.max(50,+v||50)});
+    bindLive("pH","input",v=>{n.h=Math.max(40,+v||40)});
+    bindLive("pFill","input",v=>{n.fill=v});
+    bindLive("pStroke","input",v=>{n.stroke=v});
+    bindLive("pTextColor","input",v=>{n.textColor=v});
+    bindLive("pBorder","input",v=>{n.border=Math.max(1,Math.min(16,+v||1))});
+
+    // Push undo when user finishes editing a text/number field
+    ["pText","pW","pH","pBorder"].forEach(id=>{
+      const el=document.getElementById(id);
+      if(!el)return;
+      el.addEventListener("focus",()=>pushUndo(),{once:true});
+      el.addEventListener("change",()=>saveSoon());
+    });
+    // Color/select fields are instant – push undo on first interaction per focus cycle
+    ["pFill","pStroke","pTextColor"].forEach(id=>{
+      const el=document.getElementById(id);
+      if(!el)return;
+      el.addEventListener("focus",()=>pushUndo(),{once:true});
+      el.addEventListener("change",()=>saveSoon());
+    });
+
+    document.getElementById("focusBtn").onclick=()=>centerOnNodes(nodes);
+
+    // Restore focus if it was in this panel
+    if(focusedId&&document.getElementById(focusedId)){
+      const el=document.getElementById(focusedId);
+      el.focus();
+      try{el.setSelectionRange(selStart,selEnd)}catch(e){}
+    }
+    return;
+  }
+
+  if(nodes.length>1){
+    props.innerHTML="<div class='empty'>"+nodes.length+" nodes selected. Drag any selected node to move the group, or use copy, paste, duplicate, and delete shortcuts.</div><div class='divider'></div><div class='row'><div class='field'><label>Fill</label><input id='mFill' type='color' value='#dbeafe'></div><div class='field'><label>Border</label><input id='mStroke' type='color' value='#2563eb'></div></div><button id='centerMulti' class='btn' style='width:100%;justify-content:center'>Center selection</button>";
+    document.getElementById("mFill").addEventListener("focus",()=>pushUndo(),{once:true});
+    document.getElementById("mFill").addEventListener("input",e=>{nodes.forEach(n=>n.fill=e.target.value);saveSoon();draw()});
+    document.getElementById("mStroke").addEventListener("focus",()=>pushUndo(),{once:true});
+    document.getElementById("mStroke").addEventListener("input",e=>{nodes.forEach(n=>n.stroke=e.target.value);saveSoon();draw()});
+    document.getElementById("centerMulti").onclick=()=>centerOnNodes(nodes);
+    return;
+  }
+
+  if(conn){
+    props.innerHTML="<div class='field'><label>Line label</label><input id='cLabel'></div><div class='row'><div class='field'><label>Line color</label><input id='cColor' type='color'></div><div class='field'><label>Line width</label><input id='cWidth' type='number' min='1' max='12'></div></div><button id='reverseConn' class='btn' style='width:100%;justify-content:center'>Reverse direction</button>";
+    setVal("cLabel",conn.label||"");
+    setVal("cColor",conn.color||"#64748b");
+    setVal("cWidth",conn.width||2);
+    document.getElementById("cLabel").addEventListener("focus",()=>pushUndo(),{once:true});
+    bindLive("cLabel","input",v=>{conn.label=v});
+    document.getElementById("cColor").addEventListener("focus",()=>pushUndo(),{once:true});
+    bindLive("cColor","input",v=>{conn.color=v});
+    document.getElementById("cWidth").addEventListener("focus",()=>pushUndo(),{once:true});
+    bindLive("cWidth","input",v=>{conn.width=Math.max(1,Math.min(12,+v||1))});
+    document.getElementById("reverseConn").onclick=()=>{pushUndo();const t=conn.from;conn.from=conn.to;conn.to=t;saveSoon();draw()};
+
+    if(focusedId&&document.getElementById(focusedId)){
+      const el=document.getElementById(focusedId);
+      el.focus();
+      try{el.setSelectionRange(selStart,selEnd)}catch(e){}
+    }
+    return;
+  }
+
+  props.innerHTML="<div class='empty'>Select a node to edit its shape, border, colors, size, and text. Select a line to edit its label and style.</div>";
+}
+
+function setVal(id,v){const el=document.getElementById(id);if(el)el.value=v}
+
+// Live bind: update model + redraw on every event, but NEVER rebuild the panel
+function bindLive(id,event,fn){
+  const el=document.getElementById(id);
+  if(!el)return;
+  el.addEventListener(event,e=>{fn(e.target.value);saveSoon();draw()});
+}
+
+// Legacy bind kept for any remaining call sites (unused now but kept for safety)
+function bind(id,event,fn){
+  const el=document.getElementById(id);
+  if(!el)return;
+  el.addEventListener(event,e=>{fn(e.target.value);saveSoon();draw()});
 }
 function bindMulti(id,event,fn){document.getElementById(id).addEventListener(event,e=>{fn(e.target.value);saveSoon();draw()})}
-function addNode(x,y){const p=x==null?screenToWorld(canvas.clientWidth/2,canvas.clientHeight/2):{x,y};const palette=["#dbeafe","#dcfce7","#fef3c7","#fce7f3","#ede9fe"];const strokes=["#2563eb","#16a34a","#d97706","#db2777","#7c3aed"];const i=chart().nodes.length%palette.length;const n={id:uid("n-"),x:p.x-85,y:p.y-42,w:170,h:84,shape:"square",text:"New node",fill:palette[i],stroke:strokes[i],textColor:"#111827",border:3};chart().nodes.push(n);selectedNodes=new Set([n.id]);selectedConnection=null;saveSoon();syncUI();draw()}
-function createConnection(from,to){if(from===to)return;const label=prompt("Connection label","")||"";chart().connections.push({id:uid("c-"),from,to,label,color:"#64748b",width:2});selectedNodes.clear();selectedConnection=null;connectMode=false;connectSource=null;saveSoon();syncUI();draw()}
+
+function addNode(x,y){
+  const p=x==null?screenToWorld(canvas.clientWidth/2,canvas.clientHeight/2):{x,y};
+  const palette=["#dbeafe","#dcfce7","#fef3c7","#fce7f3","#ede9fe"];
+  const strokes=["#2563eb","#16a34a","#d97706","#db2777","#7c3aed"];
+  const i=chart().nodes.length%palette.length;
+  const n={id:uid("n-"),x:p.x-85,y:p.y-42,w:170,h:84,shape:"square",text:"New node",fill:palette[i],stroke:strokes[i],textColor:"#111827",border:3};
+  pushUndo();
+  chart().nodes.push(n);
+  selectedNodes=new Set([n.id]);
+  selectedConnection=null;
+  saveSoon();syncUI();draw();
+}
+function createConnection(from,to){
+  if(from===to)return;
+  const label=prompt("Connection label","")||"";
+  pushUndo();
+  chart().connections.push({id:uid("c-"),from,to,label,color:"#64748b",width:2});
+  selectedNodes.clear();selectedConnection=null;connectMode=false;connectSource=null;
+  saveSoon();syncUI();draw();
+}
 function duplicateSelection(){copySelection();pasteSelection()}
-function copySelection(){const c=chart();const ids=[...selectedNodes];if(!ids.length)return;const nodes=c.nodes.filter(n=>selectedNodes.has(n.id)).map(n=>({...n}));const connections=c.connections.filter(e=>selectedNodes.has(e.from)&&selectedNodes.has(e.to)).map(e=>({...e}));copied={nodes,connections};showToast(nodes.length+" node"+(nodes.length===1?"":"s")+" copied")}
-function pasteSelection(){if(!copied||!copied.nodes.length)return;const c=chart();const map=new Map();const newNodes=copied.nodes.map(n=>{const id=uid("n-");map.set(n.id,id);return{...n,id,x:n.x+34,y:n.y+34}});const newConnections=copied.connections.map(e=>({...e,id:uid("c-"),from:map.get(e.from),to:map.get(e.to)})).filter(e=>e.from&&e.to);c.nodes.push(...newNodes);c.connections.push(...newConnections);selectedNodes=new Set(newNodes.map(n=>n.id));selectedConnection=null;copied={nodes:newNodes.map(n=>({...n})),connections:newConnections.map(e=>({...e}))};saveSoon();syncUI();draw();showToast("Pasted")}
-function deleteSelection(){const c=chart();if(selectedNodes.size){c.nodes=c.nodes.filter(n=>!selectedNodes.has(n.id));c.connections=c.connections.filter(e=>!selectedNodes.has(e.from)&&!selectedNodes.has(e.to));selectedNodes.clear()}else if(selectedConnection){c.connections=c.connections.filter(e=>e.id!==selectedConnection);selectedConnection=null}else{return}saveSoon();syncUI();draw()}
+function copySelection(){
+  const c=chart();
+  const ids=[...selectedNodes];
+  if(!ids.length)return;
+  const nodes=c.nodes.filter(n=>selectedNodes.has(n.id)).map(n=>({...n}));
+  const connections=c.connections.filter(e=>selectedNodes.has(e.from)&&selectedNodes.has(e.to)).map(e=>({...e}));
+  copied={nodes,connections};
+  showToast(nodes.length+" node"+(nodes.length===1?"":"s")+" copied");
+}
+function pasteSelection(){
+  if(!copied||!copied.nodes.length)return;
+  const c=chart();
+  const map=new Map();
+  const newNodes=copied.nodes.map(n=>{const id=uid("n-");map.set(n.id,id);return{...n,id,x:n.x+34,y:n.y+34}});
+  const newConnections=copied.connections.map(e=>({...e,id:uid("c-"),from:map.get(e.from),to:map.get(e.to)})).filter(e=>e.from&&e.to);
+  pushUndo();
+  c.nodes.push(...newNodes);
+  c.connections.push(...newConnections);
+  selectedNodes=new Set(newNodes.map(n=>n.id));
+  selectedConnection=null;
+  copied={nodes:newNodes.map(n=>({...n})),connections:newConnections.map(e=>({...e}))};
+  saveSoon();syncUI();draw();
+  showToast("Pasted");
+}
+function deleteSelection(){
+  const c=chart();
+  if(selectedNodes.size){
+    pushUndo();
+    c.nodes=c.nodes.filter(n=>!selectedNodes.has(n.id));
+    c.connections=c.connections.filter(e=>!selectedNodes.has(e.from)&&!selectedNodes.has(e.to));
+    selectedNodes.clear();
+  }else if(selectedConnection){
+    pushUndo();
+    c.connections=c.connections.filter(e=>e.id!==selectedConnection);
+    selectedConnection=null;
+  }else{return}
+  saveSoon();syncUI();draw();
+}
 function resizeCanvas(){const r=canvas.getBoundingClientRect();canvas.width=Math.max(1,Math.floor(r.width*dpr));canvas.height=Math.max(1,Math.floor(r.height*dpr));ctx.setTransform(dpr,0,0,dpr,0,0);draw()}
 function screenToWorld(x,y){return{x:(x-view.x)/view.scale,y:(y-view.y)/view.scale}}
 function worldToScreen(x,y){return{x:x*view.scale+view.x,y:y*view.scale+view.y}}
@@ -110,7 +301,7 @@ function drawScene(g,exporting){const c=chart();if(!exporting)drawGrid(g);g.save
 function drawGrid(g){g.fillStyle=getCss("--canvas");g.fillRect(0,0,canvas.clientWidth,canvas.clientHeight);const step=36*view.scale;const ox=((view.x%step)+step)%step;const oy=((view.y%step)+step)%step;g.strokeStyle=getCss("--grid");g.lineWidth=1;g.beginPath();for(let x=ox;x<canvas.clientWidth;x+=step){g.moveTo(x,0);g.lineTo(x,canvas.clientHeight)}for(let y=oy;y<canvas.clientHeight;y+=step){g.moveTo(0,y);g.lineTo(canvas.clientWidth,y)}g.stroke()}
 function getCss(v){return getComputedStyle(document.body).getPropertyValue(v).trim()}
 function drawNode(g,n,exporting){g.save();pathNode(g,n);g.fillStyle=n.fill;g.fill();g.lineWidth=n.border;g.strokeStyle=n.stroke;g.stroke();if(selectedNodes.has(n.id)&&!exporting){g.lineWidth=2/view.scale;g.strokeStyle=getCss("--selected");g.setLineDash([7/view.scale,5/view.scale]);pathNode(g,{...n,x:n.x-6/view.scale,y:n.y-6/view.scale,w:n.w+12/view.scale,h:n.h+12/view.scale});g.stroke();g.setLineDash([])}g.clip();g.fillStyle=n.textColor;g.textAlign="center";g.textBaseline="middle";g.font="700 15px Inter, system-ui, sans-serif";wrapText(g,n.text,n.x+n.w/2,n.y+n.h/2,n.w-28,20);g.restore()}
-function pathNode(g,n){const r=Math.min(n.h/2,32);g.beginPath();if(n.shape==="circle"){g.ellipse(n.x+n.w/2,n.y+n.h/2,n.w/2,n.h/2,0,0,Math.PI*2)}else if(n.shape==="diamond"){g.moveTo(n.x+n.w/2,n.y);g.lineTo(n.x+n.w,n.y+n.h/2);g.lineTo(n.x+n.w/2,n.y+n.h);g.lineTo(n.x,n.y+n.h/2);g.closePath()}else if(n.shape==="pill"){roundRect(g,n.x,n.y,n.w,n.h,n.h/2)}else{roundRect(g,n.x,n.y,n.w,n.h,10)}}
+function pathNode(g,n){g.beginPath();if(n.shape==="circle"){g.ellipse(n.x+n.w/2,n.y+n.h/2,n.w/2,n.h/2,0,0,Math.PI*2)}else if(n.shape==="diamond"){g.moveTo(n.x+n.w/2,n.y);g.lineTo(n.x+n.w,n.y+n.h/2);g.lineTo(n.x+n.w/2,n.y+n.h);g.lineTo(n.x,n.y+n.h/2);g.closePath()}else if(n.shape==="pill"){roundRect(g,n.x,n.y,n.w,n.h,n.h/2)}else{roundRect(g,n.x,n.y,n.w,n.h,10)}}
 function roundRect(g,x,y,w,h,r){r=Math.min(r,w/2,h/2);g.moveTo(x+r,y);g.lineTo(x+w-r,y);g.quadraticCurveTo(x+w,y,x+w,y+r);g.lineTo(x+w,y+h-r);g.quadraticCurveTo(x+w,y+h,x+w-r,y+h);g.lineTo(x+r,y+h);g.quadraticCurveTo(x,y+h,x,y+h-r);g.lineTo(x,y+r);g.quadraticCurveTo(x,y,x+r,y)}
 function wrapText(g,text,x,y,maxWidth,lineHeight){const words=(text||"").split(/\s+/);let lines=[""],line="";words.forEach(word=>{const test=line?line+" "+word:word;if(g.measureText(test).width>maxWidth&&line){lines.push(word);line=word}else{lines[lines.length-1]=test;line=test}});const start=y-(lines.length-1)*lineHeight/2;lines.slice(0,5).forEach((l,i)=>g.fillText(l,x,start+i*lineHeight))}
 function drawConnection(g,e,exporting){const c=chart();const a=c.nodes.find(n=>n.id===e.from),b=c.nodes.find(n=>n.id===e.to);if(!a||!b)return;const p1=anchor(a,b.x+b.w/2,b.y+b.h/2),p2=anchor(b,a.x+a.w/2,a.y+a.h/2);const dx=Math.abs(p2.x-p1.x);const cp=Math.max(50,dx*.42);g.save();g.strokeStyle=e.color||"#64748b";g.lineWidth=e.width||2;g.lineCap="round";g.lineJoin="round";if(selectedConnection===e.id&&!exporting){g.shadowColor=getCss("--selected");g.shadowBlur=8/view.scale}g.beginPath();g.moveTo(p1.x,p1.y);g.bezierCurveTo(p1.x+Math.sign(p2.x-p1.x||1)*cp,p1.y,p2.x-Math.sign(p2.x-p1.x||1)*cp,p2.y,p2.x,p2.y);g.stroke();drawArrow(g,p1,p2,e.color||"#64748b",e.width||2);if(e.label){const m=bezierPoint(p1,{x:p1.x+Math.sign(p2.x-p1.x||1)*cp,y:p1.y},{x:p2.x-Math.sign(p2.x-p1.x||1)*cp,y:p2.y},p2,.5);g.font="700 13px Inter, system-ui, sans-serif";const tw=g.measureText(e.label).width;g.fillStyle=document.body.dataset.theme==="dark"?"#111827":"#ffffff";g.strokeStyle=e.color||"#64748b";g.lineWidth=1.5;roundRect(g,m.x-tw/2-10,m.y-14,tw+20,28,9);g.fill();g.stroke();g.fillStyle=document.body.dataset.theme==="dark"?"#eef2ff":"#111827";g.textAlign="center";g.textBaseline="middle";g.fillText(e.label,m.x,m.y+1)}g.restore()}
@@ -122,11 +313,62 @@ function hitNode(p){const nodes=chart().nodes;for(let i=nodes.length-1;i>=0;i--)
 function hitConnection(p){const c=chart();let best=null,dist=10/view.scale;c.connections.forEach(e=>{const a=c.nodes.find(n=>n.id===e.from),b=c.nodes.find(n=>n.id===e.to);if(!a||!b)return;const p1=anchor(a,b.x+b.w/2,b.y+b.h/2),p2=anchor(b,a.x+a.w/2,a.y+a.h/2);let last=p1;for(let i=1;i<=24;i++){const t=i/24;const dx=Math.abs(p2.x-p1.x);const cp=Math.max(50,dx*.42);const pt=bezierPoint(p1,{x:p1.x+Math.sign(p2.x-p1.x||1)*cp,y:p1.y},{x:p2.x-Math.sign(p2.x-p1.x||1)*cp,y:p2.y},p2,t);const d=distToSegment(p,last,pt);if(d<dist){dist=d;best=e}last=pt}});return best}
 function distToSegment(p,a,b){const dx=b.x-a.x,dy=b.y-a.y,l=dx*dx+dy*dy;if(!l)return Math.hypot(p.x-a.x,p.y-a.y);let t=((p.x-a.x)*dx+(p.y-a.y)*dy)/l;t=Math.max(0,Math.min(1,t));return Math.hypot(p.x-(a.x+t*dx),p.y-(a.y+t*dy))}
 canvas.addEventListener("contextmenu",e=>e.preventDefault());
-canvas.addEventListener("pointerdown",e=>{canvas.setPointerCapture(e.pointerId);pointer={down:true,button:e.button,last:{x:e.clientX,y:e.clientY},start:{x:e.clientX,y:e.clientY},worldStart:screenToWorld(e.offsetX,e.offsetY),dragNode:false,marquee:false,pan:false,moved:false};if(e.button===2){pointer.pan=true;workspace.classList.add("panning");return}const p=screenToWorld(e.offsetX,e.offsetY);const n=hitNode(p);if(connectMode){if(n){if(!connectSource){connectSource=n.id;showToast("Source selected. Choose a target node.")}else{createConnection(connectSource,n.id)}}return}if(n){if(e.shiftKey){selectedNodes.has(n.id)?selectedNodes.delete(n.id):selectedNodes.add(n.id)}else if(!selectedNodes.has(n.id)){selectedNodes=new Set([n.id])}selectedConnection=null;pointer.dragNode=true;syncUI();draw()}else{const edge=hitConnection(p);if(edge){selectedNodes.clear();selectedConnection=edge.id;syncUI();draw()}else{selectedNodes.clear();selectedConnection=null;pointer.marquee=true;marquee={x1:p.x,y1:p.y,x2:p.x,y2:p.y};syncUI();draw()}}});
-canvas.addEventListener("pointermove",e=>{if(!pointer.down)return;const dx=e.clientX-pointer.last.x,dy=e.clientY-pointer.last.y;if(Math.abs(e.clientX-pointer.start.x)+Math.abs(e.clientY-pointer.start.y)>3)pointer.moved=true;if(pointer.pan){view.x+=dx;view.y+=dy;pointer.last={x:e.clientX,y:e.clientY};draw();return}const p=screenToWorld(e.offsetX,e.offsetY);if(pointer.dragNode){const wdx=dx/view.scale,wdy=dy/view.scale;chart().nodes.forEach(n=>{if(selectedNodes.has(n.id)){n.x+=wdx;n.y+=wdy}});pointer.last={x:e.clientX,y:e.clientY};saveSoon();draw();return}if(pointer.marquee&&marquee){marquee.x2=p.x;marquee.y2=p.y;const x=Math.min(marquee.x1,marquee.x2),y=Math.min(marquee.y1,marquee.y2),w=Math.abs(marquee.x2-marquee.x1),h=Math.abs(marquee.y2-marquee.y1);selectedNodes=new Set(chart().nodes.filter(n=>n.x+n.w>=x&&n.x<=x+w&&n.y+n.h>=y&&n.y<=y+h).map(n=>n.id));selectedConnection=null;draw()}});
+canvas.addEventListener("pointerdown",e=>{
+  canvas.setPointerCapture(e.pointerId);
+  pointer={down:true,button:e.button,last:{x:e.clientX,y:e.clientY},start:{x:e.clientX,y:e.clientY},worldStart:screenToWorld(e.offsetX,e.offsetY),dragNode:false,marquee:false,pan:false,moved:false};
+  if(e.button===2){pointer.pan=true;workspace.classList.add("panning");return}
+  const p=screenToWorld(e.offsetX,e.offsetY);
+  const n=hitNode(p);
+  if(connectMode){if(n){if(!connectSource){connectSource=n.id;showToast("Source selected. Choose a target node.")}else{createConnection(connectSource,n.id)}}return}
+  if(n){
+    if(e.shiftKey){selectedNodes.has(n.id)?selectedNodes.delete(n.id):selectedNodes.add(n.id)}
+    else if(!selectedNodes.has(n.id)){selectedNodes=new Set([n.id])}
+    selectedConnection=null;
+    pointer.dragNode=true;
+    pointer.undoPushed=false; // will push undo on first actual move
+    syncUI();draw();
+  }else{
+    const edge=hitConnection(p);
+    if(edge){selectedNodes.clear();selectedConnection=edge.id;syncUI();draw()}
+    else{selectedNodes.clear();selectedConnection=null;pointer.marquee=true;marquee={x1:p.x,y1:p.y,x2:p.x,y2:p.y};syncUI();draw()}
+  }
+});
+canvas.addEventListener("pointermove",e=>{
+  if(!pointer.down)return;
+  const dx=e.clientX-pointer.last.x,dy=e.clientY-pointer.last.y;
+  if(Math.abs(e.clientX-pointer.start.x)+Math.abs(e.clientY-pointer.start.y)>3)pointer.moved=true;
+  if(pointer.pan){view.x+=dx;view.y+=dy;pointer.last={x:e.clientX,y:e.clientY};draw();return}
+  const p=screenToWorld(e.offsetX,e.offsetY);
+  if(pointer.dragNode){
+    // Push undo once, the first time the node actually moves
+    if(!pointer.undoPushed&&pointer.moved){pushUndo();pointer.undoPushed=true}
+    const wdx=dx/view.scale,wdy=dy/view.scale;
+    chart().nodes.forEach(n=>{if(selectedNodes.has(n.id)){n.x+=wdx;n.y+=wdy}});
+    pointer.last={x:e.clientX,y:e.clientY};
+    saveSoon();draw();return;
+  }
+  if(pointer.marquee&&marquee){
+    marquee.x2=p.x;marquee.y2=p.y;
+    const x=Math.min(marquee.x1,marquee.x2),y=Math.min(marquee.y1,marquee.y2),w=Math.abs(marquee.x2-marquee.x1),h=Math.abs(marquee.y2-marquee.y1);
+    selectedNodes=new Set(chart().nodes.filter(n=>n.x+n.w>=x&&n.x<=x+w&&n.y+n.h>=y&&n.y<=y+h).map(n=>n.id));
+    selectedConnection=null;draw();
+  }
+});
 canvas.addEventListener("pointerup",e=>{pointer.down=false;workspace.classList.remove("panning");if(pointer.marquee){marquee=null;syncUI();draw()}});
 canvas.addEventListener("wheel",e=>{e.preventDefault();const rect=canvas.getBoundingClientRect();const sx=e.clientX-rect.left,sy=e.clientY-rect.top;const before=screenToWorld(sx,sy);const factor=e.deltaY<0?1.09:.92;view.scale=Math.max(.15,Math.min(3.5,view.scale*factor));view.x=sx-before.x*view.scale;view.y=sy-before.y*view.scale;syncUI();draw()},{passive:false});
-document.addEventListener("keydown",e=>{const mod=e.ctrlKey||e.metaKey;if(mod&&e.key.toLowerCase()==="c"){e.preventDefault();copySelection()}else if(mod&&e.key.toLowerCase()==="v"){e.preventDefault();pasteSelection()}else if(mod&&e.key.toLowerCase()==="d"){e.preventDefault();duplicateSelection()}else if(mod&&e.key.toLowerCase()==="s"){e.preventDefault();saveNow();showToast("Saved locally")}else if(e.key==="Delete"||e.key==="Backspace"){if(document.activeElement&&["INPUT","TEXTAREA","SELECT"].includes(document.activeElement.tagName))return;e.preventDefault();deleteSelection()}else if(e.key==="Escape"){connectMode=false;connectSource=null;marquee=null;syncUI();draw()}else if((e.key==="+"||e.key==="=")&&!document.activeElement.matches("input,textarea")){view.scale=Math.min(3.5,view.scale*1.12);syncUI();draw()}else if(e.key==="-"&&!document.activeElement.matches("input,textarea")){view.scale=Math.max(.15,view.scale*.88);syncUI();draw()}});
+document.addEventListener("keydown",e=>{
+  const mod=e.ctrlKey||e.metaKey;
+  const inInput=document.activeElement&&["INPUT","TEXTAREA","SELECT"].includes(document.activeElement.tagName);
+  if(mod&&e.key.toLowerCase()==="z"){e.preventDefault();undo();return}
+  if(mod&&e.key.toLowerCase()==="c"){e.preventDefault();copySelection()}
+  else if(mod&&e.key.toLowerCase()==="v"){e.preventDefault();pasteSelection()}
+  else if(mod&&e.key.toLowerCase()==="d"){e.preventDefault();duplicateSelection()}
+  else if(mod&&e.key.toLowerCase()==="s"){e.preventDefault();saveNow();showToast("Saved locally")}
+  else if(e.key==="Delete"||e.key==="Backspace"){if(inInput)return;e.preventDefault();deleteSelection()}
+  else if(e.key==="Escape"){connectMode=false;connectSource=null;marquee=null;syncUI();draw()}
+  else if((e.key==="+"||e.key==="=")&&!inInput){view.scale=Math.min(3.5,view.scale*1.12);syncUI();draw()}
+  else if(e.key==="-"&&!inInput){view.scale=Math.max(.15,view.scale*.88);syncUI();draw()}
+});
 titleInput.addEventListener("blur",()=>{const c=chart();c.name=uniqueName(titleInput.value,c.id);titleInput.value=c.name;saveNow();renderCharts()});
 titleInput.addEventListener("keydown",e=>{if(e.key==="Enter")titleInput.blur()});
 document.getElementById("newChartBtn").onclick=newChart;
@@ -140,6 +382,8 @@ function exportJpeg(){const c=chart();if(!c.nodes.length){showToast("Add at leas
 function showToast(msg){toast.textContent=msg;toast.classList.add("show");clearTimeout(showToast.t);showToast.t=setTimeout(()=>toast.classList.remove("show"),2200)}
 window.addEventListener("resize",resizeCanvas);
 resizeCanvas();fitView(false);syncUI();draw();saveNow();
+// Seed the undo stack with the initial state
+pushUndo();
 })();
 </script>
 </html>
